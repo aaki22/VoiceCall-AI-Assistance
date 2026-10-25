@@ -1,6 +1,12 @@
+import logging
+import os
+from pathlib import Path
 from functools import lru_cache
 from typing import Optional
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Dynamically calculate the absolute path to the .env file relative to this script
+_ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
 
 # Application Constants
 APP_NAME = "Theodore Voice AI"
@@ -21,7 +27,8 @@ LANG_TANGLISH = "tanglish"
 class Settings(BaseSettings):
     """Application settings loaded from environment variables and .env file."""
 
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    # Pass the explicitly targeted _ENV_FILE path directly to Pydantic
+    model_config = SettingsConfigDict(env_file=_ENV_FILE, env_file_encoding="utf-8", extra="ignore")
 
     # Server Runtime
     APP_ENV: str = "development"
@@ -45,7 +52,7 @@ class Settings(BaseSettings):
     VOBIZ_ACCOUNT_SID: str = "AC_DEV_VOBIZ"
     VOBIZ_AUTH_TOKEN: str = "DEV_AUTH_TOKEN"
     VOBIZ_PHONE_NUMBER: str = "+914440001122"
-    VOBIZ_API_BASE_URL: str = "https://api.vobiz.ai/api/v1"
+    VOBIZ_API_BASE_URL: str = "https://vobiz.ai"
 
     # Inworld AI TTS-2 Flash
     INWORLD_API_KEY: str = "dummy_inworld_key"
@@ -55,7 +62,7 @@ class Settings(BaseSettings):
 
     # LangSmith Observability
     LANGCHAIN_TRACING_V2: str = "true"
-    LANGCHAIN_ENDPOINT: str = "https://api.smith.langchain.com"
+    LANGCHAIN_ENDPOINT: str = "https://langchain.com"
     LANGCHAIN_API_KEY: Optional[str] = None
     LANGCHAIN_PROJECT: str = "theodore-voice-telephony"
 
@@ -63,4 +70,11 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     """Singleton getter for application settings."""
-    return Settings()
+    logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
+    logger = logging.getLogger("SettingsLogger")
+    
+    # Confirm the explicit file target location
+    logger.info(f"Targeting explicit file layout for environment variables at: {_ENV_FILE}")
+    
+    settings = Settings()
+    return settings
