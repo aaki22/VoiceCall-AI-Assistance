@@ -1,6 +1,0 @@
-AUDIO_MOUNT_PATH = "/audio"
-AUDIO_MOUNT_NAME = "audio"
-INBOUND_PATH = "/inbound"
-PROCESS_RECORDING_PATH = "/process-recording"
-HEALTH_PATH = "/health"
-HEALTH_DB_PATH = "/health/db"

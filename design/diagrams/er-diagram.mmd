@@ -1,0 +1,63 @@
+erDiagram
+    CALL_SESSIONS ||--o{ CONVERSATION_TURNS : contains
+    CALL_SESSIONS ||--o{ VOICE_REMINDERS : schedules
+    CALL_SESSIONS ||--o{ AUDIT_LOGS : records
+
+    CALL_SESSIONS {
+        uuid id PK
+        string session_id UK "Unique external session identifier"
+        string call_sid "Vobiz carrier call identifier"
+        string caller_phone "E.164 phone number"
+        string virtual_did "Assigned Theodore DID virtual number"
+        string status "ringing | active | streaming | completed | failed"
+        string detected_language "ta | en | tanglish"
+        string playback_state "idle | speaking | streaming | interrupted"
+        int turns_count "Accumulated turn count"
+        string langsmith_run_id "Root Run Tree ID"
+        string correlation_id "Distributed trace UUID"
+        datetime created_at
+        datetime updated_at
+        datetime deleted_at "Soft delete timestamp"
+    }
+
+    CONVERSATION_TURNS {
+        uuid id PK
+        string session_id FK
+        int turn_index
+        string speaker "user | assistant | system"
+        text utterance "Spoken dialogue transcript"
+        string detected_language "ta | en | tanglish"
+        string tool_called "search | maps | transit | youtube | reminder"
+        jsonb grounding_metadata "Citations, URIs, search chunks"
+        jsonb latencies "VAD, LangGraph, tool, and TTFT breakdown"
+        boolean barge_in_occurred
+        string langsmith_run_id
+        datetime created_at
+        datetime updated_at
+        datetime deleted_at
+    }
+
+    VOICE_REMINDERS {
+        uuid id PK
+        string session_id FK
+        string recipient_phone "E.164 target phone number"
+        text reminder_text "Spoken reminder content"
+        datetime scheduled_time_utc "Target reminder dispatch time"
+        string preferred_language "ta | en"
+        string status "pending | completed | cancelled | failed"
+        string outbound_call_sid
+        int retry_count
+        datetime created_at
+        datetime updated_at
+        datetime deleted_at
+    }
+
+    AUDIT_LOGS {
+        uuid id PK
+        string correlation_id
+        string session_id FK
+        string event_type "call_started | vad_turn_locked | tool_executed | barge_in | call_ended"
+        string node_name
+        jsonb details "Contextual audit payload"
+        datetime created_at
+    }

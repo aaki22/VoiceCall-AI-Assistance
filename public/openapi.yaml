@@ -1,0 +1,14 @@
+openapi: 3.0.0
+info:
+  title: Theodore - Grounded Multilingual Telephony AI Assistant & Streaming Control System
+  version: 1.0.0
+  description: |
+    Production API for Theodore, a real-time conversational telephony AI assistant.
+    Provides automated voice services over standard telephony carrier networks (via Vobiz.ai bidirectional 8kHz WebSockets).
+  contact:
+    name: Telephony Voice AI Engineering Team
+    email: voice-ai-support@theodore.internal
+servers:
+  - url: "http://localhost:8000"
+    description: Local Development / Test Server
+$ref: "/design/api/openapi.yaml"

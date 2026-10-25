@@ -1,0 +1,950 @@
+openapi: 3.0.0
+info:
+  title: Theodore - Grounded Multilingual Telephony AI Assistant & Streaming Control System
+  version: 1.0.0
+  description: |
+    Production API for Theodore, a real-time conversational telephony AI assistant.
+    Provides automated voice services over standard telephony carrier networks (via Vobiz.ai bidirectional 8kHz WebSockets).
+    
+    Core Capabilities:
+    - Bi-directional 8kHz linear PCM / μ-law WebSocket streaming (Vobiz.ai integration)
+    - Voice Activity Detection (VAD) with 600ms hangover turn-taking
+    - Instant Voice Barge-In (<300ms) with `clearAudio` buffer flush and subprocess group SIGTERM
+    - Bilingual English, Tamil, and Tanglish dialogue handling with dynamic turn-by-turn detection
+    - Real-time E-Commerce product pricing via Google Search Grounding (`ChatGoogle`)
+    - Local service provider discovery via Google Maps Grounding (`googleMaps` tool)
+    - Public transit guidance with strict IRCTC seat booking boundary guardrails (`CRIT-TRANSIT-01`)
+    - Conversational voice reminder scheduling with background outbound Vobiz call dispatcher
+    - Zero-disk-delay YouTube audio streaming via direct `yt-dlp` to `ffmpeg` pipe
+    - Full agent observability via LangSmith distributed tracing (`TheodoreVoiceSessionTurn`)
+  contact:
+    name: Telephony Voice AI Engineering Team
+    email: voice-ai-support@theodore.internal
+
+servers:
+  - url: "https://api.theodore-voice.internal"
+    description: Production Carrier Gateway
+  - url: "http://localhost:8000"
+    description: Local Development / Test Server
+
+paths:
+  # ─── Health & Readiness Probes ───
+  /healthCheck:
+    get:
+      summary: Health check probe
+      description: |
+        Liveness probe for container orchestrators (k8s, AWS ECS Fargate, ALB).
+        Returns 200 if the FastAPI application process is up and listening.
+        Intentionally unauthenticated.
+      operation_id: healthCheck
+      tags:
+        - Health
+      security: []
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+              examples:
+                healthy:
+                  summary: Server process is running
+                  value:
+                    status: "success"
+                    code: 200
+                    message: "Theodore voice telephony service is healthy"
+                    data:
+                      checks:
+                        server: "ok"
+                        uptime_seconds: 3421
+                    errors: []
+                    timestamp: "2026-10-25T10:30:45.123Z"
+                    request_id: "req-7f3a9b2c-4d1e-4a8f-9c5b-6e2d8f1a3b4c"
+
+  /ready:
+    get:
+      summary: Readiness probe
+      description: |
+        Validates database connectivity, Gemini API key configuration,
+        Inworld TTS connection, and Vobiz telephony gateway readiness.
+      operation_id: readyCheck
+      tags:
+        - Health
+      security: []
+      responses:
+        '200':
+          description: Service dependencies are connected and ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+              examples:
+                ready:
+                  value:
+                    status: "success"
+                    code: 200
+                    message: "All dependencies are operational"
+                    data:
+                      dependencies:
+                        database: "connected"
+                        gemini_api: "authenticated"
+                        inworld_tts: "ready"
+                        vobiz_gateway: "configured"
+                        langsmith_tracing: "active"
+                    errors: []
+                    timestamp: "2026-10-25T10:30:45.123Z"
+                    request_id: "req-7f3a9b2c-4d1e-4a8f-9c5b-6e2d8f1a3b4c"
+        '503':
+          description: Service dependencies unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+              examples:
+                db_down:
+                  value:
+                    status: "error"
+                    code: 503
+                    message: "Service Unavailable"
+                    data: null
+                    errors:
+                      - field: "database"
+                        code: "DATABASE_CONNECTION_ERROR"
+                        message: "Cannot connect to PostgreSQL host"
+                    timestamp: "2026-10-25T10:30:45.123Z"
+                    request_id: "req-7f3a9b2c-4d1e-4a8f-9c5b-6e2d8f1a3b4c"
+
+  /docs:
+    get:
+      summary: OpenAPI Interactive Documentation
+      description: Serves the Swagger UI API documentation page for the telephony core.
+      operation_id: getApiDocs
+      tags:
+        - Health
+      security: []
+      responses:
+        '200':
+          description: Interactive documentation UI (HTML)
+
+  # ─── Telephony Inbound Webhooks & Sessions ───
+  /api/v1/telephony/webhook:
+    post:
+      summary: Vobiz Inbound Call Webhook
+      description: |
+        Primary webhook invoked by Vobiz.ai carrier gateway upon an incoming phone call.
+        
+        Process Flow:
+        1. Validates Vobiz signature header (`X-Vobiz-Signature`).
+        2. Generates a unique `session_id` and records the initial `call_session` in PostgreSQL.
+        3. Instantiates LangGraph state checkpointer for the session.
+        4. Returns VobizXML with `<Stream>` verb configured for bidirectional 8kHz PCM streaming.
+      operation_id: handleVobizWebhook
+      tags:
+        - Telephony Gateway
+      security:
+        - vobiz_signature: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required:
+                - CallSid
+                - From
+                - To
+              properties:
+                CallSid:
+                  type: string
+                  example: "CA9876543210abcdef0123456789abcdef"
+                From:
+                  type: string
+                  description: Caller phone number in E.164 format.
+                  example: "+919840012345"
+                To:
+                  type: string
+                  description: Theodore Vobiz DID virtual number.
+                  example: "+914440001122"
+                CallStatus:
+                  type: string
+                  example: "ringing"
+                Direction:
+                  type: string
+                  example: "inbound"
+      responses:
+        '200':
+          description: VobizXML instructions directing carrier to open bidirectional WebSocket stream
+          content:
+            application/xml:
+              schema:
+                type: string
+                example: |
+                  <Response>
+                    <Stream bidirectional="true" keepCallAlive="true" url="wss://api.theodore-voice.internal/api/v1/telephony/stream/sess-0192a83f-4e5c-7b21" />
+                  </Response>
+        '401':
+          description: Invalid Vobiz webhook signature
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+        '500':
+          description: Internal processing failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+
+  /api/v1/telephony/sessions:
+    get:
+      summary: List telephony call sessions
+      description: |
+        Retrieves paginated telephony call sessions, filterable by status, language, or phone number.
+      operation_id: listTelephonySessions
+      tags:
+        - Telephony Sessions
+      security:
+        - bearer_auth: []
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [ringing, active, streaming, completed, failed]
+        - name: language
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [ta, en, tanglish]
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 20
+        - name: offset
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 0
+      responses:
+        '200':
+          description: List of call sessions retrieved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+              examples:
+                sessions:
+                  value:
+                    status: "success"
+                    code: 200
+                    message: "Call sessions retrieved"
+                    data:
+                      total: 42
+                      limit: 20
+                      offset: 0
+                      items:
+                        - session_id: "sess-0192a83f-4e5c-7b21"
+                          call_sid: "CA9876543210abcdef0123456789abcdef"
+                          caller_phone: "+919840012345"
+                          status: "active"
+                          detected_language: "ta"
+                          playback_state: "idle"
+                          turns_count: 5
+                          started_at: "2026-10-25T10:20:00.000Z"
+                          ended_at: null
+                          langsmith_run_id: "0192a83f-run-tree-root"
+                    errors: []
+                    timestamp: "2026-10-25T10:30:45.123Z"
+                    request_id: "req-7f3a9b2c-4d1e-4a8f-9c5b-6e2d8f1a3b4c"
+
+  /api/v1/telephony/sessions/{session_id}:
+    get:
+      summary: Get call session details
+      description: Retrieves complete metadata and runtime state for a given telephony session.
+      operation_id: getTelephonySession
+      tags:
+        - Telephony Sessions
+      security:
+        - bearer_auth: []
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "sess-0192a83f-4e5c-7b21"
+      responses:
+        '200':
+          description: Call session details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '404':
+          description: Session not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+
+  /api/v1/telephony/sessions/{session_id}/turns:
+    get:
+      summary: Get conversational turns for a session
+      description: |
+        Retrieves turn-by-turn dialogue history, including transcript text, detected language,
+        invoked tools, latency breakdown, and grounding citations.
+      operation_id: getSessionTurns
+      tags:
+        - Telephony Sessions
+      security:
+        - bearer_auth: []
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "sess-0192a83f-4e5c-7b21"
+      responses:
+        '200':
+          description: Conversation turns retrieved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+              examples:
+                turns_list:
+                  value:
+                    status: "success"
+                    code: 200
+                    message: "Session conversation turns retrieved"
+                    data:
+                      session_id: "sess-0192a83f-4e5c-7b21"
+                      turns:
+                        - turn_index: 1
+                          speaker: "user"
+                          utterance: "Chennai to Coimbatore train timings sollunga"
+                          detected_language: "ta"
+                          audio_duration_ms: 2400
+                          timestamp: "2026-10-25T10:20:05.100Z"
+                        - turn_index: 1
+                          speaker: "assistant"
+                          utterance: "Chennai Central-la irundhu Kovai-ku Cheran Express kaalai 6:10 AM-ku purappadum, pinbu Kovai Express 2:20 PM-ku irukku. Live seat availability therinjukkolla helpline 139 call pannalaam."
+                          tool_called: "transit_tool"
+                          grounding_sources:
+                            - title: "Southern Railway Timetable"
+                              uri: "https://enquiry.indianrail.gov.in"
+                          latencies:
+                            vad_boundary_ms: 612
+                            langgraph_route_ms: 84
+                            tool_execution_ms: 820
+                            tts_first_chunk_ms: 240
+                            total_turnaround_ms: 1756
+                          langsmith_run_id: "run-turn-1-0192a"
+                          barge_in_occurred: false
+                    errors: []
+                    timestamp: "2026-10-25T10:30:45.123Z"
+                    request_id: "req-7f3a9b2c-4d1e-4a8f-9c5b-6e2d8f1a3b4c"
+
+  /api/v1/telephony/sessions/{session_id}/terminate:
+    post:
+      summary: Terminate call session
+      description: |
+        Hangs up the active call, instructs Vobiz gateway to close the leg,
+        kills any running media subprocess groups (`SIGTERM`), and commits the final session audit log.
+      operation_id: terminateSession
+      tags:
+        - Telephony Sessions
+      security:
+        - bearer_auth: []
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "sess-0192a83f-4e5c-7b21"
+      responses:
+        '200':
+          description: Session terminated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+
+  /api/v1/telephony/stream/barge-in/{session_id}:
+    post:
+      summary: Trigger barge-in stream cutoff
+      description: |
+        Explicit control endpoint to simulate or force an instant barge-in cutoff.
+        
+        Execution:
+        1. Emits `clearAudio` event across Vobiz WebSocket to flush client buffers.
+        2. Sends `SIGTERM` to the active `yt-dlp` / `ffmpeg` process group.
+        3. Flushes pending synthesis tokens and resets session `playback_state` to `idle`.
+      operation_id: triggerBargeIn
+      tags:
+        - Telephony Gateway
+      security:
+        - bearer_auth: []
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "sess-0192a83f-4e5c-7b21"
+      responses:
+        '200':
+          description: Barge-in cutoff executed within <300ms SLA
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+              examples:
+                barge_in_ok:
+                  value:
+                    status: "success"
+                    code: 200
+                    message: "Barge-in cutoff executed"
+                    data:
+                      session_id: "sess-0192a83f-4e5c-7b21"
+                      cutoff_latency_ms: 142
+                      vobiz_clear_audio_sent: true
+                      subprocess_terminated_pid: 28419
+                      new_playback_state: "idle"
+                    errors: []
+                    timestamp: "2026-10-25T10:30:45.123Z"
+                    request_id: "req-7f3a9b2c-4d1e-4a8f-9c5b-6e2d8f1a3b4c"
+
+  # ─── Voice Reminders Management ───
+  /api/v1/reminders:
+    post:
+      summary: Schedule a voice reminder
+      description: |
+        Schedules a voice reminder for an outbound automated telephone call.
+        Accepts absolute or relative ISO timestamps.
+      operation_id: scheduleReminder
+      tags:
+        - Voice Reminders
+      security:
+        - bearer_auth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - recipient_phone
+                - reminder_text
+                - scheduled_time_utc
+              properties:
+                recipient_phone:
+                  type: string
+                  example: "+919840012345"
+                reminder_text:
+                  type: string
+                  example: "Take your evening blood pressure medicine with warm water."
+                scheduled_time_utc:
+                  type: string
+                  format: date-time
+                  example: "2026-10-25T14:30:00Z"
+                preferred_language:
+                  type: string
+                  enum: [en, ta]
+                  default: "ta"
+      responses:
+        '200':
+          description: Voice reminder scheduled successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+              examples:
+                created:
+                  value:
+                    status: "success"
+                    code: 200
+                    message: "Voice reminder scheduled"
+                    data:
+                      reminder_id: "rem-9102-4abc-99ef"
+                      recipient_phone: "+919840012345"
+                      reminder_text: "Take your evening blood pressure medicine with warm water."
+                      scheduled_time_utc: "2026-10-25T14:30:00Z"
+                      status: "pending"
+                    errors: []
+                    timestamp: "2026-10-25T10:30:45.123Z"
+                    request_id: "req-7f3a9b2c-4d1e-4a8f-9c5b-6e2d8f1a3b4c"
+        '400':
+          description: Bad request (invalid phone or past timestamp)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+
+    get:
+      summary: List voice reminders
+      description: Retrieves scheduled, completed, and pending voice reminders.
+      operation_id: listReminders
+      tags:
+        - Voice Reminders
+      security:
+        - bearer_auth: []
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [pending, completed, failed, cancelled]
+        - name: recipient_phone
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 20
+        - name: offset
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 0
+      responses:
+        '200':
+          description: Reminders retrieved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+
+  /api/v1/reminders/{reminder_id}:
+    get:
+      summary: Get reminder details
+      operation_id: getReminder
+      tags:
+        - Voice Reminders
+      security:
+        - bearer_auth: []
+      parameters:
+        - name: reminder_id
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "rem-9102-4abc-99ef"
+      responses:
+        '200':
+          description: Reminder details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+        '404':
+          description: Reminder not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardErrorResponse'
+
+    patch:
+      summary: Update or cancel reminder
+      operation_id: updateReminder
+      tags:
+        - Voice Reminders
+      security:
+        - bearer_auth: []
+      parameters:
+        - name: reminder_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reminder_text:
+                  type: string
+                scheduled_time_utc:
+                  type: string
+                  format: date-time
+                status:
+                  type: string
+                  enum: [pending, cancelled]
+      responses:
+        '200':
+          description: Reminder updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+
+  /api/v1/reminders/{reminder_id}/trigger:
+    post:
+      summary: Trigger outbound reminder call immediately
+      description: |
+        Dispatches an outbound voice call via Vobiz REST API, synthesizes the message,
+        and marks the reminder status as completed.
+      operation_id: triggerOutboundReminder
+      tags:
+        - Voice Reminders
+      security:
+        - bearer_auth: []
+      parameters:
+        - name: reminder_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Outbound call triggered
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+
+  # ─── Headless Voice Agent & Tool Simulation (Developer / Test) ───
+  /api/v1/agent/turn:
+    post:
+      summary: Execute conversational agent turn (Headless)
+      description: |
+        Executes a single conversational voice turn without WebSockets.
+        Ideal for end-to-end integration testing, CLI clients, and automated CI tests.
+      operation_id: executeAgentTurn
+      tags:
+        - Agent & Tool Testing
+      security:
+        - bearer_auth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - utterance
+              properties:
+                session_id:
+                  type: string
+                  nullable: true
+                  description: Existing session ID or null to auto-generate.
+                utterance:
+                  type: string
+                  example: "iPhone 15 price in India lowest offer sollunga"
+                language_override:
+                  type: string
+                  enum: [ta, en, tanglish]
+                  nullable: true
+      responses:
+        '200':
+          description: Agent turn response with full tool execution & grounding metadata
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+              examples:
+                turn_response:
+                  value:
+                    status: "success"
+                    code: 200
+                    message: "Agent turn processed successfully"
+                    data:
+                      session_id: "sess-0192a83f-4e5c-7b21"
+                      spoken_response: "iPhone 15 128GB model ippo Flipkart-la 65,999 rupees-ku kidaikkudhu. Amazon-la 66,499 rupees irukku. HDFC card-ku 2,000 rupees extra discount irukku."
+                      detected_language: "ta"
+                      tool_invoked: "search_tool"
+                      grounding_sources:
+                        - title: "Flipkart iPhone 15 Deals"
+                          uri: "https://www.flipkart.com/apple-iphone-15"
+                        - title: "Amazon India iPhone 15"
+                          uri: "https://www.amazon.in/dp/B0CHX1W1XY"
+                      telemetry:
+                        total_latency_ms: 1340
+                        token_usage:
+                          prompt_tokens: 380
+                          completion_tokens: 65
+                        langsmith_run_id: "run-turn-0192a-direct"
+                    errors: []
+                    timestamp: "2026-10-25T10:30:45.123Z"
+                    request_id: "req-7f3a9b2c-4d1e-4a8f-9c5b-6e2d8f1a3b4c"
+
+  /api/v1/agent/tools/transit:
+    post:
+      summary: Test public transit tool & IRCTC guardrails
+      description: |
+        Directly evaluates transit queries against `CRIT-TRANSIT-01` capability boundaries.
+        Verifies that train schedules are retrieved while live seat bookings are rejected with helpline 139.
+      operation_id: testTransitTool
+      tags:
+        - Agent & Tool Testing
+      security:
+        - bearer_auth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - query
+              properties:
+                query:
+                  type: string
+                  example: "Book me 2 AC berths on Cheran express tomorrow"
+      responses:
+        '200':
+          description: Transit tool evaluation result with guardrail check
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+              examples:
+                guardrail_pass:
+                  value:
+                    status: "success"
+                    code: 200
+                    message: "Transit tool executed with guardrail enforcement"
+                    data:
+                      query: "Book me 2 AC berths on Cheran express tomorrow"
+                      guardrail_rule: "CRIT-TRANSIT-01"
+                      booking_attempt_detected: true
+                      booking_refused: true
+                      helpline_139_offered: true
+                      spoken_output: "Naan direct railway tickets book panna mudiyaadhu. Official booking-ku IRCTC app alladhu Helpline 139 use pannalaam. Ungalukku travel reminder set panna sollungalaam."
+                    errors: []
+                    timestamp: "2026-10-25T10:30:45.123Z"
+                    request_id: "req-7f3a9b2c-4d1e-4a8f-9c5b-6e2d8f1a3b4c"
+
+  /api/v1/agent/tools/youtube-stream:
+    post:
+      summary: Test zero-delay YouTube audio pipe
+      description: |
+        Resolves a YouTube audio stream URL and tests ffmpeg 8kHz PCM transcoding pipeline
+        without local disk accumulation.
+      operation_id: testYouTubeAudioPipe
+      tags:
+        - Agent & Tool Testing
+      security:
+        - bearer_auth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - query
+              properties:
+                query:
+                  type: string
+                  example: "M.S. Subbulakshmi Vishnu Sahasranamam"
+      responses:
+        '200':
+          description: Stream URL extracted and pipe verified
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+
+  # ─── Observability & Auditing ───
+  /api/v1/audit/logs:
+    get:
+      summary: Query system audit logs
+      description: Returns structured JSON audit records matching correlation_id, session_id, or event_type.
+      operation_id: queryAuditLogs
+      tags:
+        - Observability & Audit
+      security:
+        - bearer_auth: []
+      parameters:
+        - name: correlation_id
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: session_id
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: event_type
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [call_started, vad_turn_locked, tool_executed, barge_in_interrupted, call_ended]
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 50
+      responses:
+        '200':
+          description: Audit logs retrieved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+
+  /api/v1/audit/langsmith-trace/{session_id}:
+    get:
+      summary: Get LangSmith trace reference
+      description: |
+        Retrieves the LangSmith root run tree URL, project link, and telemetry metrics
+        for a specific telephony session.
+      operation_id: getLangSmithTrace
+      tags:
+        - Observability & Audit
+      security:
+        - bearer_auth: []
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: LangSmith trace information retrieved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardSuccessResponse'
+              examples:
+                trace_info:
+                  value:
+                    status: "success"
+                    code: 200
+                    message: "LangSmith trace details retrieved"
+                    data:
+                      session_id: "sess-0192a83f-4e5c-7b21"
+                      project_name: "theodore-voice-telephony"
+                      root_run_id: "0192a83f-run-tree-root"
+                      trace_url: "https://smith.langchain.com/o/org-voice/projects/p/theodore-voice-telephony/r/0192a83f-run-tree-root"
+                      total_turns_traced: 5
+                      total_tokens: 2840
+                      total_tool_calls: 3
+                    errors: []
+                    timestamp: "2026-10-25T10:30:45.123Z"
+                    request_id: "req-7f3a9b2c-4d1e-4a8f-9c5b-6e2d8f1a3b4c"
+
+components:
+  securitySchemes:
+    bearer_auth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Bearer token for authorized telephony operators and automated microservices.
+    vobiz_signature:
+      type: apiKey
+      in: header
+      name: X-Vobiz-Signature
+      description: HMAC-SHA256 signature calculated across request payload using the Vobiz Auth Token.
+
+  schemas:
+    StandardSuccessResponse:
+      type: object
+      required:
+        - status
+        - code
+        - message
+        - data
+        - errors
+        - timestamp
+        - request_id
+      properties:
+        status:
+          type: string
+          enum: [success]
+          example: "success"
+        code:
+          type: integer
+          example: 200
+        message:
+          type: string
+          example: "Operation completed successfully"
+        data:
+          type: object
+          nullable: true
+        errors:
+          type: array
+          items:
+            type: object
+          example: []
+        timestamp:
+          type: string
+          format: date-time
+          example: "2026-10-25T10:30:45.123Z"
+        request_id:
+          type: string
+          format: uuid
+          example: "req-7f3a9b2c-4d1e-4a8f-9c5b-6e2d8f1a3b4c"
+
+    StandardErrorResponse:
+      type: object
+      required:
+        - status
+        - code
+        - message
+        - data
+        - errors
+        - timestamp
+        - request_id
+      properties:
+        status:
+          type: string
+          enum: [error]
+          example: "error"
+        code:
+          type: integer
+          example: 400
+        message:
+          type: string
+          example: "Invalid Request Parameters"
+        data:
+          type: object
+          nullable: true
+          example: null
+        errors:
+          type: array
+          items:
+            type: object
+            required:
+              - field
+              - code
+              - message
+            properties:
+              field:
+                type: string
+                example: "recipient_phone"
+              code:
+                type: string
+                example: "INVALID_PHONE_FORMAT"
+              message:
+                type: string
+                example: "recipient_phone must be in E.164 international format (e.g. +919840012345)"
+        timestamp:
+          type: string
+          format: date-time
+          example: "2026-10-25T10:30:45.123Z"
+        request_id:
+          type: string
+          format: uuid
+          example: "req-7f3a9b2c-4d1e-4a8f-9c5b-6e2d8f1a3b4c"

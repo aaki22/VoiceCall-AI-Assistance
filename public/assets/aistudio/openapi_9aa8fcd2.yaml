@@ -1,0 +1,1913 @@
+openapi: 3.0.0
+info:
+  title: Automated Notification Service
+  version: 1.0.0
+  description: |
+    API for the Jira → Microsoft Teams Notification System.
+    Handles four use cases:
+    - UC1: Daily Work Item & Delay Notification (scheduled 6:30 AM / 3:30 PM UTC)
+    - UC2: Delivery Status Communication & Escalation (event-driven + polling fallback)
+    - UC3: Sprint Progress Update (scheduled Tue/Thu 8:30 AM UTC)
+    - UC4: Sprint Readiness Check (scheduled Wednesday 4:30 AM UTC)
+  contact:
+    name: Notification Service Team
+    email: support@engineering-dashboard.com
+
+servers:
+  - url: "https://api.example.com/pma"
+
+paths:
+  # ─── Default Endpoints ───
+  /healthCheck:
+    get:
+      summary: Health check
+      description: |
+        Liveness and readiness probe. Returns 200 if the service is running.
+        This endpoint is intentionally unauthenticated for use by load balancers
+        and container orchestration health probes (k8s, ECS).
+      operation_id: healthCheck
+      tags:
+        - Health
+      security: []
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "success"
+                  code:
+                    type: integer
+                    example: 200
+                  message:
+                    type: string
+                    example: "Service is healthy"
+                  data:
+                    type: object
+                    properties:
+                      checks:
+                        type: object
+                        properties:
+                          server:
+                            type: string
+                            example: "ok"
+                  errors:
+                    type: array
+                    items:
+                      type: object
+                    example: []
+                  timestamp:
+                    type: string
+                    format: date-time
+                    example: "2024-02-26T10:30:45.123Z"
+                  request_id:
+                    type: string
+                    format: uuid
+                    example: "req-7f3a9b2c-4d1e-4a8f-9c5b-6e2d8f1a3b4c"
+              examples:
+                success:
+                  summary: Server is running
+                  value:
+                    status: "success"
+                    code: 200
+                    message: "Service is healthy"
+                    data:
+                      checks:
+                        server: "ok"
+                    errors: []
+                    timestamp: "2024-02-26T10:30:45.123Z"
+                    request_id: "req-7f3a9b2c-4d1e-4a8f-9c5b-6e2d8f1a3b4c"
+
+  /docs:
+    get:
+      summary: API documentation
+      description: Serves the RapiDoc API documentation UI for the notification service.
+      operation_id: getApiDocs
+      tags:
+        - Health
+      responses:
+        '200':
+          description: API documentation page (HTML)
+
+  # ─── UC1: Daily Work Item & Delay Notification ───
+  /automated-notification-service/api/v1/daily-notification/trigger:
+    get:
+      summary: Trigger daily work item notification
+      description: |
+        Triggers the daily work item notification for all projects.
+        Normally invoked by the scheduler at 6:30 AM UTC (daily_start) and 3:30 PM UTC (daily_end).
+        The service determines which notification type to send based on the current UTC time.
+
+        Process Flow:
+        1. Bulk-queries all active issues with start_date <= now and due_date >= today (or overdue)
+           across all projects, excluding statuses: Done, Closed, Resolved, Blocked, On Hold, Waiting, Impediment
+        2. Groups issues by project, then by engineer
+        3. Classifies each issue as Delayed (due_date < today) / In Progress / Not Started
+           using Jira status category mapping (new → Not Started, indeterminate → In Progress)
+        4. Identifies untagged items not in the active sprint
+        5. Renders Adaptive Card from notification_templates (template_key: daily_start or daily_end)
+        6. Batch-sends to project Teams chats (50 concurrent) via Microsoft Graph API
+        7. Logs each send/skip/fail to notification_logs
+
+        Skips a project when:
+        - No Teams chat mapping found
+        - No active issues matching criteria
+        - daily_notification_enabled = false on the mapping
+      operation_id: triggerDailyNotification
+      tags:
+        - Daily Notification
+      security:
+        - bearer_auth: []
+        - jira_account_id: []
+      responses:
+        '200':
+          description: Daily notification process started
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "success"
+                  code:
+                    type: integer
+                    example: 200
+                  message:
+                    type: string
+                    example: "Daily notification process has been started"
+                  data:
+                    type: object
+                    nullable: true
+                  errors:
+                    type: array
+                    items:
+                      type: object
+                    example: []
+                  timestamp:
+                    type: string
+                    format: date-time
+                    example: "2024-02-26T13:00:45.123Z"
+                  request_id:
+                    type: string
+                    format: uuid
+                    example: "req-7f3a9b2c-4d1e-4a8f-9c5b-6e2d8f1a3b4c"
+              examples:
+                success:
+                  summary: Daily notification triggered
+                  value:
+                    status: "success"
+                    code: 200
+                    message: "Daily notification process has been started"
+                    data: null
+                    errors: []
+                    timestamp: "2024-02-26T13:00:45.123Z"
+                    request_id: "req-7f3a9b2c-4d1e-4a8f-9c5b-6e2d8f1a3b4c"
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "error"
+                  code:
+                    type: integer
+                    example: 401
+                  message:
+                    type: string
+                    example: "Unauthorized"
+                  data:
+                    type: object
+                    nullable: true
+                  errors:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        field:
+                          type: string
+                        code:
+                          type: string
+                        message:
+                          type: string
+                  timestamp:
+                    type: string
+                    format: date-time
+                  request_id:
+                    type: string
+                    format: uuid
+              examples:
+                unauthorized:
+                  value:
+                    status: "error"
+                    code: 401
+                    message: "Unauthorized"
+                    data: null
+                    errors:
+                      - field: "Authorization"
+                        code: "UNAUTHORIZED"
+                        message: "Invalid or expired authentication token"
+                    timestamp: "2024-02-26T13:00:45.123Z"
+                    request_id: "req-7f3a9b2c-4d1e-4a8f-9c5b-6e2d8f1a3b4c"
+        '500':
+          description: Internal error
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "error"
+                  code:
+                    type: integer
+                    example: 500
+                  message:
+                    type: string
+                  data:
+                    type: object
+                    nullable: true
+                  errors:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        field:
+                          type: string
+                        code:
+                          type: string
+                        message:
+                          type: string
+                  timestamp:
+                    type: string
+                    format: date-time
+                  request_id:
+                    type: string
+                    format: uuid
+              examples:
+                server_error:
+                  value:
+                    status: "error"
+                    code: 500
+                    message: "Internal Error"
+                    data: null
+                    errors:
+                      - field: "dailyNotification"
+                        code: "INTERNAL_ERROR"
+                        message: "An unexpected error occurred while processing daily notifications"
+                    timestamp: "2024-02-26T13:00:45.123Z"
+                    request_id: "req-7f3a9b2c-4d1e-4a8f-9c5b-6e2d8f1a3b4c"
+        '502':
+          description: Bad Gateway - Microsoft Graph API failure during notification sending
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "error"
+                  code:
+                    type: integer
+                    example: 502
+                  message:
+                    type: string
+                    example: "Graph API Error"
+                  data:
+                    type: object
+                    nullable: true
+                  errors:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        field:
+                          type: string
+                        code:
+                          type: string
+                        message:
+                          type: string
+                  timestamp:
+                    type: string
+                    format: date-time
+                  request_id:
+                    type: string
+                    format: uuid
+              examples:
+                graph_api_forbidden:
+                  summary: Graph API returned 403 Forbidden
+                  value:
+                    status: "error"
+                    code: 502
+                    message: "Graph API Error"
+                    data: null
+                    errors:
+                      - field: "graphApi"
+                        code: "GRAPH_API_FORBIDDEN"
+                        message: "The application is not part of the chat roster"
+                    timestamp: "2024-02-26T13:00:45.123Z"
+                    request_id: "req-7f3a9b2c-4d1e-4a8f-9c5b-6e2d8f1a3b4c"
+                graph_api_rate_limited:
+                  summary: Graph API returned 429 Too Many Requests
+                  value:
+                    status: "error"
+                    code: 502
+                    message: "Graph API Error"
+                    data: null
+                    errors:
+                      - field: "graphApi"
+                        code: "GRAPH_API_RATE_LIMITED"
+                        message: "Rate limit exceeded after 3 retries"
+                    timestamp: "2024-02-26T13:00:45.123Z"
+                    request_id: "req-7f3a9b2c-4d1e-4a8f-9c5b-6e2d8f1a3b4c"
+                graph_api_token_failure:
+                  summary: Failed to acquire Graph API access token
+                  value:
+                    status: "error"
+                    code: 502
+                    message: "Graph API Error"
+                    data: null
+                    errors:
+                      - field: "graphApi"
+                        code: "GRAPH_API_TOKEN_ERROR"
+                        message: "Failed to acquire access token from Azure AD"
+                    timestamp: "2024-02-26T13:00:45.123Z"
+                    request_id: "req-7f3a9b2c-4d1e-4a8f-9c5b-6e2d8f1a3b4c"
+
+  # ─── UC2: Delivery Status Communication & Escalation ───
+  /automated-notification-service/api/v1/delivery-notification/issue/{issue_key}:
+    post:
+      summary: Handle delivery work item event
+      description: |
+        Single endpoint called by Jira Automation rules for delivery work items.
+        Determines the event type (created vs delayed) by inspecting the issue status.
+
+        Jira Automation triggers:
+        - Rule 1: Issue created with type = Delivery → calls this endpoint
+        - Rule 2: Issue status changed to "Delayed" with type = Delivery → calls this endpoint
+
+        Process Flow:
+        1. Fetches fresh issue details from Jira REST API (GET /rest/api/3/issue/{issue_key})
+           with fields: summary, status, project, issuetype, assignee
+        2. Checks if issue exists in local DB and reads current status
+        3. Determines event type:
+           - created: issue not in DB, or exists but status != "Delayed"
+           - delayed: issue exists in DB and status = "Delayed"
+        4. Deduplication: checks notification_logs for same issue_key + notification_type within 5 minutes
+        5. Resolves project Teams chat mapping from project_teams_mappings
+        6. Created flow: Renders delivery_created Adaptive Card → sends to project chat
+        7. Delayed flow:
+           - Renders delivery_delayed_project card → sends to project chat
+           - Resolves specialization via: issue custom field → assignee specialization → project primary_specialization_id
+           - Looks up specialization_escalation_mappings for the escalation chat
+           - Renders delivery_delayed_escalation card with @mention of specialization head → sends to escalation chat
+        8. Logs all send/skip/fail outcomes to notification_logs
+
+        Polling fallback: A separate scheduler runs every 15 minutes, queries delivery items
+        created or changed to "Delayed" in the last 30 minutes that have no matching notification_logs
+        entry, and processes them through the same flow internally.
+      operation_id: handleDeliveryNotification
+      tags:
+        - Delivery Notification
+      security:
+        - bearer_auth: []
+        - jira_account_id: []
+      parameters:
+        - name: issue_key
+          in: path
+          required: true
+          description: |
+            Jira issue key (e.g. "PROJ-123"). Passed by Jira Automation via {{issue.key}}.
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 50
+            example: "PROJ-123"
+      responses:
+        '200':
+          description: Notification processed successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "success"
+                  code:
+                    type: integer
+                    example: 200
+                  message:
+                    type: string
+                    example: "Delivery notification processed"
+                  data:
+                    type: object
+                    properties:
+                      event:
+                        type: string
+                        enum: [created, delayed]
+                        example: "delayed"
+                      issue_key:
+                        type: string
+                        example: "PROJ-123"
+                      notifications_sent:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            notification_type:
+                              type: string
+                              enum: [delivery_created, delivery_delayed_project, delivery_delayed_escalation]
+                            teams_chat_id:
+                              type: string
+                            status:
+                              type: string
+                              enum: [sent, failed, skipped]
+                            error:
+                              type: string
+                              nullable: true
+                  errors:
+                    type: array
+                    items:
+                      type: object
+                    example: []
+                  timestamp:
+                    type: string
+                    format: date-time
+                    example: "2024-02-26T10:30:45.123Z"
+                  request_id:
+                    type: string
+                    format: uuid
+                    example: "req-7f3a9b2c-4d1e-4a8f-9c5b-6e2d8f1a3b4c"
+              examples:
+                created:
+                  summary: Delivery item created notification sent
+                  value:
+                    status: "success"
+                    code: 200
+                    message: "Delivery notification processed"
+                    data:
+                      event: "created"
+                      issue_key: "PROJ-123"
+                      notifications_sent:
+                        - notification_type: "delivery_created"
+                          teams_chat_id: "19:abc123@thread.v2"
+                          status: "sent"
+                          error: null
+                    errors: []
+                    timestamp: "2024-02-26T10:30:45.123Z"
+                    request_id: "req-7f3a9b2c-4d1e-4a8f-9c5b-6e2d8f1a3b4c"
+                delayed:
+                  summary: Delivery item delayed — project chat + escalation
+                  value:
+                    status: "success"
+                    code: 200
+                    message: "Delivery notification processed"
+                    data:
+                      event: "delayed"
+                      issue_key: "PROJ-123"
+                      notifications_sent:
+                        - notification_type: "delivery_delayed_project"
+                          teams_chat_id: "19:abc123@thread.v2"
+                          status: "sent"
+                          error: null
+                        - notification_type: "delivery_delayed_escalation"
+                          teams_chat_id: "19:esc456@thread.v2"
+                          status: "sent"
+                          error: null
+                    errors: []
+                    timestamp: "2024-02-26T10:30:45.123Z"
+                    request_id: "req-7f3a9b2c-4d1e-4a8f-9c5b-6e2d8f1a3b4c"
+                skipped_duplicate:
+                  summary: Duplicate notification skipped
+                  value:
+                    status: "success"
+                    code: 200
+                    message: "Delivery notification skipped"
+                    data:
+                      event: null
+                      issue_key: "PROJ-123"
+                      skip_reason: "duplicate"
+                      notifications_sent: []
+                    errors: []
+                    timestamp: "2024-02-26T10:30:45.123Z"
+                    request_id: "req-7f3a9b2c-4d1e-4a8f-9c5b-6e2d8f1a3b4c"
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "error"
+                  code:
+                    type: integer
+                    example: 400
+                  message:
+                    type: string
+                    example: "Bad Request"
+                  data:
+                    type: object
+                    nullable: true
+                  errors:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        field:
+                          type: string
+                        code:
+                          type: string
+                        message:
+                          type: string
+                  timestamp:
+                    type: string
+                    format: date-time
+                  request_id:
+                    type: string
+                    format: uuid
+              examples:
+                bad_request:
+                  value:
+                    status: "error"
+                    code: 400
+                    message: "Bad Request"
+                    data: null
+                    errors:
+                      - field: "issue_key"
+                        code: "INVALID_PARAMETER"
+                        message: "Invalid issue_key format"
+                    timestamp: "2024-02-26T10:30:45.123Z"
+                    request_id: "req-7f3a9b2c-4d1e-4a8f-9c5b-6e2d8f1a3b4c"
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "error"
+                  code:
+                    type: integer
+                    example: 401
+                  message:
+                    type: string
+                    example: "Unauthorized"
+                  data:
+                    type: object
+                    nullable: true
+                  errors:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        field:
+                          type: string
+                        code:
+                          type: string
+                        message:
+                          type: string
+                  timestamp:
+                    type: string
+                    format: date-time
+                  request_id:
+                    type: string
+                    format: uuid
+              examples:
+                unauthorized:
+                  value:
+                    status: "error"
+                    code: 401
+                    message: "Unauthorized"
+                    data: null
+                    errors:
+                      - field: "Authorization"
+                        code: "UNAUTHORIZED"
+                        message: "Invalid or expired authentication token"
+                    timestamp: "2024-02-26T10:30:45.123Z"
+                    request_id: "req-7f3a9b2c-4d1e-4a8f-9c5b-6e2d8f1a3b4c"
+        '404':
+          description: Issue not found in Jira
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "error"
+                  code:
+                    type: integer
+                    example: 404
+                  message:
+                    type: string
+                    example: "Not Found"
+                  data:
+                    type: object
+                    nullable: true
+                  errors:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        field:
+                          type: string
+                        code:
+                          type: string
+                        message:
+                          type: string
+                  timestamp:
+                    type: string
+                    format: date-time
+                  request_id:
+                    type: string
+                    format: uuid
+              examples:
+                not_found:
+                  value:
+                    status: "error"
+                    code: 404
+                    message: "Not Found"
+                    data: null
+                    errors:
+                      - field: "issue_key"
+                        code: "ISSUE_NOT_FOUND"
+                        message: "Issue PROJ-123 not found in Jira"
+                    timestamp: "2024-02-26T10:30:45.123Z"
+                    request_id: "req-7f3a9b2c-4d1e-4a8f-9c5b-6e2d8f1a3b4c"
+        '422':
+          description: Unprocessable Entity - issue validation failed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "error"
+                  code:
+                    type: integer
+                    example: 422
+                  message:
+                    type: string
+                    example: "Validation Error"
+                  data:
+                    type: object
+                    nullable: true
+                  errors:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        field:
+                          type: string
+                        code:
+                          type: string
+                        message:
+                          type: string
+                  timestamp:
+                    type: string
+                    format: date-time
+                  request_id:
+                    type: string
+                    format: uuid
+              examples:
+                not_delivery_type:
+                  summary: Issue is not a Delivery type
+                  value:
+                    status: "error"
+                    code: 422
+                    message: "Validation Error"
+                    data: null
+                    errors:
+                      - field: "issue_key"
+                        code: "INVALID_ISSUE_TYPE"
+                        message: "Only Delivery issue types are supported. Received: Story"
+                    timestamp: "2024-02-26T10:30:45.123Z"
+                    request_id: "req-7f3a9b2c-4d1e-4a8f-9c5b-6e2d8f1a3b4c"
+                invalid_issue_key:
+                  summary: Issue key format invalid
+                  value:
+                    status: "error"
+                    code: 422
+                    message: "Validation Error"
+                    data: null
+                    errors:
+                      - field: "issue_key"
+                        code: "VALIDATION_ERROR"
+                        message: "issue_key must be a non-empty string with max 50 characters"
+                    timestamp: "2024-02-26T10:30:45.123Z"
+                    request_id: "req-7f3a9b2c-4d1e-4a8f-9c5b-6e2d8f1a3b4c"
+        '500':
+          description: Internal error
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "error"
+                  code:
+                    type: integer
+                    example: 500
+                  message:
+                    type: string
+                  data:
+                    type: object
+                    nullable: true
+                  errors:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        field:
+                          type: string
+                        code:
+                          type: string
+                        message:
+                          type: string
+                  timestamp:
+                    type: string
+                    format: date-time
+                  request_id:
+                    type: string
+                    format: uuid
+              examples:
+                server_error:
+                  value:
+                    status: "error"
+                    code: 500
+                    message: "Internal Error"
+                    data: null
+                    errors:
+                      - field: "deliveryNotification"
+                        code: "INTERNAL_ERROR"
+                        message: "An unexpected error occurred while processing delivery notification"
+                    timestamp: "2024-02-26T10:30:45.123Z"
+                    request_id: "req-7f3a9b2c-4d1e-4a8f-9c5b-6e2d8f1a3b4c"
+
+  # ─── UC3: Sprint Progress Update ───
+  /automated-notification-service/api/v1/sprint-progress/trigger:
+    get:
+      summary: Trigger sprint progress notification
+      description: |
+        Triggers the sprint progress update for all projects with active sprints.
+        Normally invoked by the scheduler at 8:30 AM UTC on Tuesday and Thursday.
+
+        Process Flow:
+        1. Bulk-queries sprint metrics across all projects with active sprints:
+           - Total/completed issues and story points
+           - Expected SP by today (issues with due_date <= today)
+           - Completed SP by today (done issues with due_date <= today)
+           - Status breakdown: not started, in progress
+           - Open risks/bugs count (issue_type in Bug, Risk, Issue, Impediment and not done)
+        2. Queries overdue stories per project (due_date <= today AND status not done)
+        3. Calculates sprint-level spillover risk by comparing expected vs actual daily rate:
+           - First week (lenient): High if 40%+ below, Medium if 20-40% below, Low otherwise
+           - Second week (aggressive): High if 20%+ below, Medium if 0-20% below, Low otherwise
+        4. Resolves project leads (Tech Lead, Delivery Lead, PM) for @mentions
+        5. Renders sprint_progress Adaptive Card from notification_templates
+        6. Batch-sends to project Teams chats (50 concurrent) with lead @mentions
+        7. Logs each send/skip/fail to notification_logs
+
+        Skips a project when:
+        - No Teams chat mapping found
+        - No active sprint
+        - sprint_progress_enabled = false on the mapping
+      operation_id: triggerSprintProgress
+      tags:
+        - Sprint Progress
+      security:
+        - bearer_auth: []
+        - jira_account_id: []
+      responses:
+        '200':
+          description: Sprint progress process started
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "success"
+                  code:
+                    type: integer
+                    example: 200
+                  message:
+                    type: string
+                    example: "Sprint progress notification process has been started"
+                  data:
+                    type: object
+                    nullable: true
+                  errors:
+                    type: array
+                    items:
+                      type: object
+                    example: []
+                  timestamp:
+                    type: string
+                    format: date-time
+                    example: "2024-02-27T14:00:45.123Z"
+                  request_id:
+                    type: string
+                    format: uuid
+                    example: "req-7f3a9b2c-4d1e-4a8f-9c5b-6e2d8f1a3b4c"
+              examples:
+                success:
+                  summary: Sprint progress triggered
+                  value:
+                    status: "success"
+                    code: 200
+                    message: "Sprint progress notification process has been started"
+                    data: null
+                    errors: []
+                    timestamp: "2024-02-27T14:00:45.123Z"
+                    request_id: "req-7f3a9b2c-4d1e-4a8f-9c5b-6e2d8f1a3b4c"
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "error"
+                  code:
+                    type: integer
+                    example: 401
+                  message:
+                    type: string
+                    example: "Unauthorized"
+                  data:
+                    type: object
+                    nullable: true
+                  errors:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        field:
+                          type: string
+                        code:
+                          type: string
+                        message:
+                          type: string
+                  timestamp:
+                    type: string
+                    format: date-time
+                  request_id:
+                    type: string
+                    format: uuid
+              examples:
+                unauthorized:
+                  value:
+                    status: "error"
+                    code: 401
+                    message: "Unauthorized"
+                    data: null
+                    errors:
+                      - field: "Authorization"
+                        code: "UNAUTHORIZED"
+                        message: "Invalid or expired authentication token"
+                    timestamp: "2024-02-27T14:00:45.123Z"
+                    request_id: "req-7f3a9b2c-4d1e-4a8f-9c5b-6e2d8f1a3b4c"
+        '500':
+          description: Internal error
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "error"
+                  code:
+                    type: integer
+                    example: 500
+                  message:
+                    type: string
+                  data:
+                    type: object
+                    nullable: true
+                  errors:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        field:
+                          type: string
+                        code:
+                          type: string
+                        message:
+                          type: string
+                  timestamp:
+                    type: string
+                    format: date-time
+                  request_id:
+                    type: string
+                    format: uuid
+              examples:
+                server_error:
+                  value:
+                    status: "error"
+                    code: 500
+                    message: "Internal Error"
+                    data: null
+                    errors:
+                      - field: "sprintProgress"
+                        code: "INTERNAL_ERROR"
+                        message: "An unexpected error occurred while processing sprint progress"
+                    timestamp: "2024-02-27T14:00:45.123Z"
+                    request_id: "req-7f3a9b2c-4d1e-4a8f-9c5b-6e2d8f1a3b4c"
+        '502':
+          description: Bad Gateway - Microsoft Graph API failure during notification sending
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "error"
+                  code:
+                    type: integer
+                    example: 502
+                  message:
+                    type: string
+                    example: "Graph API Error"
+                  data:
+                    type: object
+                    nullable: true
+                  errors:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        field:
+                          type: string
+                        code:
+                          type: string
+                        message:
+                          type: string
+                  timestamp:
+                    type: string
+                    format: date-time
+                  request_id:
+                    type: string
+                    format: uuid
+              examples:
+                graph_api_error:
+                  summary: Graph API failure during batch send
+                  value:
+                    status: "error"
+                    code: 502
+                    message: "Graph API Error"
+                    data: null
+                    errors:
+                      - field: "graphApi"
+                        code: "GRAPH_API_ERROR"
+                        message: "Microsoft Graph API returned an error during notification sending"
+                    timestamp: "2024-02-27T14:00:45.123Z"
+                    request_id: "req-7f3a9b2c-4d1e-4a8f-9c5b-6e2d8f1a3b4c"
+
+  # ─── UC4: Sprint Readiness Check ───
+  /automated-notification-service/api/v1/sprint-readiness/trigger:
+    get:
+      summary: Trigger sprint readiness check
+      description: |
+        Triggers the sprint readiness check for all projects.
+        Normally invoked by the scheduler at 4:30 AM UTC every Wednesday.
+
+        Process Flow:
+        1. Identifies current, next, and following sprints per project using ranked sprint query
+        2. Calculates baseline from current sprint total story points
+        3. Fetches future sprint metrics with gap detection:
+           - Total items and story points per future sprint
+           - Count of issues with missing/empty story points
+           - Count of issues in Draft status
+        4. Next sprint evaluation (+-20% threshold):
+           - PASS: story points within [baseline x 0.80, baseline x 1.20]
+           - FAIL: outside range, calculates deficit
+        5. Following sprint evaluation (>=50% threshold):
+           - PASS: story points >= baseline x 0.50
+           - FAIL: below minimum required
+        6. Renders sprint_readiness_next and sprint_readiness_following Adaptive Cards → sends to project chat
+        7. Escalation check — fires only when BOTH conditions are true:
+           - Next sprint FAILS its threshold
+           - Next sprint starts next week
+           Then resolves specialization, sends escalation card with @mention to escalation chat
+        8. Logs all outcomes to notification_logs
+
+        Edge cases:
+        - No future sprints: reports "No upcoming sprints found"
+        - Only one future sprint: evaluates next only
+        - Future sprint has 0 issues: reports 0 SP, will breach threshold
+        - Baseline is 0 SP: skips threshold comparison, reports as informational
+      operation_id: triggerSprintReadiness
+      tags:
+        - Sprint Readiness
+      security:
+        - bearer_auth: []
+        - jira_account_id: []
+      responses:
+        '200':
+          description: Sprint readiness process started
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "success"
+                  code:
+                    type: integer
+                    example: 200
+                  message:
+                    type: string
+                    example: "Sprint readiness check process has been started"
+                  data:
+                    type: object
+                    nullable: true
+                  errors:
+                    type: array
+                    items:
+                      type: object
+                    example: []
+                  timestamp:
+                    type: string
+                    format: date-time
+                    example: "2024-02-28T10:00:45.123Z"
+                  request_id:
+                    type: string
+                    format: uuid
+                    example: "req-7f3a9b2c-4d1e-4a8f-9c5b-6e2d8f1a3b4c"
+              examples:
+                success:
+                  summary: Sprint readiness triggered
+                  value:
+                    status: "success"
+                    code: 200
+                    message: "Sprint readiness check process has been started"
+                    data: null
+                    errors: []
+                    timestamp: "2024-02-28T10:00:45.123Z"
+                    request_id: "req-7f3a9b2c-4d1e-4a8f-9c5b-6e2d8f1a3b4c"
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "error"
+                  code:
+                    type: integer
+                    example: 401
+                  message:
+                    type: string
+                    example: "Unauthorized"
+                  data:
+                    type: object
+                    nullable: true
+                  errors:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        field:
+                          type: string
+                        code:
+                          type: string
+                        message:
+                          type: string
+                  timestamp:
+                    type: string
+                    format: date-time
+                  request_id:
+                    type: string
+                    format: uuid
+              examples:
+                unauthorized:
+                  value:
+                    status: "error"
+                    code: 401
+                    message: "Unauthorized"
+                    data: null
+                    errors:
+                      - field: "Authorization"
+                        code: "UNAUTHORIZED"
+                        message: "Invalid or expired authentication token"
+                    timestamp: "2024-02-28T10:00:45.123Z"
+                    request_id: "req-7f3a9b2c-4d1e-4a8f-9c5b-6e2d8f1a3b4c"
+        '500':
+          description: Internal error
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "error"
+                  code:
+                    type: integer
+                    example: 500
+                  message:
+                    type: string
+                  data:
+                    type: object
+                    nullable: true
+                  errors:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        field:
+                          type: string
+                        code:
+                          type: string
+                        message:
+                          type: string
+                  timestamp:
+                    type: string
+                    format: date-time
+                  request_id:
+                    type: string
+                    format: uuid
+              examples:
+                server_error:
+                  value:
+                    status: "error"
+                    code: 500
+                    message: "Internal Error"
+                    data: null
+                    errors:
+                      - field: "sprintReadiness"
+                        code: "INTERNAL_ERROR"
+                        message: "An unexpected error occurred while processing sprint readiness"
+                    timestamp: "2024-02-28T10:00:45.123Z"
+                    request_id: "req-7f3a9b2c-4d1e-4a8f-9c5b-6e2d8f1a3b4c"
+        '502':
+          description: Bad Gateway - Microsoft Graph API failure during notification sending
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "error"
+                  code:
+                    type: integer
+                    example: 502
+                  message:
+                    type: string
+                    example: "Graph API Error"
+                  data:
+                    type: object
+                    nullable: true
+                  errors:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        field:
+                          type: string
+                        code:
+                          type: string
+                        message:
+                          type: string
+                  timestamp:
+                    type: string
+                    format: date-time
+                  request_id:
+                    type: string
+                    format: uuid
+              examples:
+                graph_api_error:
+                  summary: Graph API failure during batch send
+                  value:
+                    status: "error"
+                    code: 502
+                    message: "Graph API Error"
+                    data: null
+                    errors:
+                      - field: "graphApi"
+                        code: "GRAPH_API_ERROR"
+                        message: "Microsoft Graph API returned an error during notification sending"
+                    timestamp: "2024-02-28T10:00:45.123Z"
+                    request_id: "req-7f3a9b2c-4d1e-4a8f-9c5b-6e2d8f1a3b4c"
+
+  # ─── Mappings ───
+  /automated-notification-service/api/v1/mappings/project/teams:
+    post:
+      summary: Upsert project Teams chat mapping
+      description: |
+        Webhook-triggered endpoint that inserts or updates the Microsoft Teams chat/channel
+        mapping for a given project in the project_teams_mappings table.
+
+        Accepts Teams chat and channel links (URLs) in the request body. The service extracts
+        the chat_id and channel_id from the URLs by parsing and URL-decoding the path segments.
+
+        Behavior:
+        - Looks up the project by jira_project_key in the projects table
+        - Extracts teams_chat_id from teams_chat_link URL
+        - Extracts teams_channel_id from teams_channel_link URL (if provided)
+        - If no active mapping exists for the project → inserts a new record
+        - If an active mapping already exists → updates the existing record
+        - After upsert, automatically adds the service account to the Teams chat via Graph API
+
+        Typically called by an external webhook (e.g. Forge app, admin tool) when a project's
+        Teams chat link is configured or changed.
+      operation_id: upsertProjectTeamsLink
+      tags:
+        - Mappings
+      security:
+        - bearer_auth: []
+        - jira_account_id: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - jira_project_key
+                - teams_chat_link
+              properties:
+                jira_project_key:
+                  type: string
+                  description: Jira project key used to look up the project in the local DB.
+                  example: "PROJ"
+                teams_chat_link:
+                  type: string
+                  description: Full Microsoft Teams group chat URL. The service extracts the chat_id from this URL.
+                  example: "https://teams.microsoft.com/l/chat/19%3Aabc123%40thread.v2/0?tenantId=xxx"
+                teams_channel_link:
+                  type: string
+                  nullable: true
+                  description: Full Microsoft Teams channel URL (optional). The service extracts the channel_id if provided.
+                  example: "https://teams.microsoft.com/l/channel/19%3Achannel123%40thread.tacv2/General?groupId=xxx"
+            examples:
+              with_chat_only:
+                summary: Map project to a group chat
+                value:
+                  jira_project_key: "PROJ"
+                  teams_chat_link: "https://teams.microsoft.com/l/chat/19%3Aabc123%40thread.v2/0?tenantId=xxx"
+              with_chat_and_channel:
+                summary: Map project to chat and channel
+                value:
+                  jira_project_key: "PROJ"
+                  teams_chat_link: "https://teams.microsoft.com/l/chat/19%3Aabc123%40thread.v2/0?tenantId=xxx"
+                  teams_channel_link: "https://teams.microsoft.com/l/channel/19%3Achannel123%40thread.tacv2/General?groupId=xxx"
+      responses:
+        '200':
+          description: Project Teams mapping inserted or updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "success"
+                  code:
+                    type: integer
+                    example: 200
+                  message:
+                    type: string
+                    example: "Project Teams mapping upserted successfully"
+                  data:
+                    type: object
+                    properties:
+                      project_teams_mapping_id:
+                        type: string
+                        format: uuid
+                      message:
+                        type: string
+                        description: Operation result message
+                        example: "Mapping inserted successfully"
+                  errors:
+                    type: array
+                    items:
+                      type: object
+                    example: []
+                  timestamp:
+                    type: string
+                    format: date-time
+                  request_id:
+                    type: string
+                    format: uuid
+              examples:
+                inserted:
+                  summary: New mapping created
+                  value:
+                    status: "success"
+                    code: 200
+                    message: "Project Teams mapping upserted successfully"
+                    data:
+                      project_teams_mapping_id: "f1e2d3c4-b5a6-7890-abcd-ef1234567890"
+                      message: "Mapping inserted successfully"
+                    errors: []
+                    timestamp: "2024-02-26T10:30:45.123Z"
+                    request_id: "req-7f3a9b2c-4d1e-4a8f-9c5b-6e2d8f1a3b4c"
+                updated:
+                  summary: Existing mapping updated
+                  value:
+                    status: "success"
+                    code: 200
+                    message: "Project Teams mapping upserted successfully"
+                    data:
+                      project_teams_mapping_id: "f1e2d3c4-b5a6-7890-abcd-ef1234567890"
+                      message: "Mapping updated successfully"
+                    errors: []
+                    timestamp: "2024-02-26T10:30:45.123Z"
+                    request_id: "req-7f3a9b2c-4d1e-4a8f-9c5b-6e2d8f1a3b4c"
+        '400':
+          description: Bad Request - missing fields or invalid Teams link format
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "error"
+                  code:
+                    type: integer
+                    example: 400
+                  message:
+                    type: string
+                    example: "Bad Request"
+                  data:
+                    type: object
+                    nullable: true
+                  errors:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        field:
+                          type: string
+                        code:
+                          type: string
+                        message:
+                          type: string
+                  timestamp:
+                    type: string
+                    format: date-time
+                  request_id:
+                    type: string
+                    format: uuid
+              examples:
+                missing_field:
+                  value:
+                    status: "error"
+                    code: 400
+                    message: "Bad Request"
+                    data: null
+                    errors:
+                      - field: "teams_chat_link"
+                        code: "REQUIRED_FIELD"
+                        message: "teams_chat_link is required"
+                    timestamp: "2024-02-26T10:30:45.123Z"
+                    request_id: "req-7f3a9b2c-4d1e-4a8f-9c5b-6e2d8f1a3b4c"
+                invalid_link:
+                  value:
+                    status: "error"
+                    code: 400
+                    message: "Bad Request"
+                    data: null
+                    errors:
+                      - field: "teams_chat_link"
+                        code: "INVALID_PARAMETER"
+                        message: "Invalid Teams chat link format"
+                    timestamp: "2024-02-26T10:30:45.123Z"
+                    request_id: "req-7f3a9b2c-4d1e-4a8f-9c5b-6e2d8f1a3b4c"
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "error"
+                  code:
+                    type: integer
+                    example: 401
+                  message:
+                    type: string
+                    example: "Unauthorized"
+                  data:
+                    type: object
+                    nullable: true
+                  errors:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        field:
+                          type: string
+                        code:
+                          type: string
+                        message:
+                          type: string
+                  timestamp:
+                    type: string
+                    format: date-time
+                  request_id:
+                    type: string
+                    format: uuid
+        '404':
+          description: Project not found by jira_project_key
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "error"
+                  code:
+                    type: integer
+                    example: 404
+                  message:
+                    type: string
+                    example: "Not Found"
+                  data:
+                    type: object
+                    nullable: true
+                  errors:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        field:
+                          type: string
+                        code:
+                          type: string
+                        message:
+                          type: string
+                  timestamp:
+                    type: string
+                    format: date-time
+                  request_id:
+                    type: string
+                    format: uuid
+              examples:
+                not_found:
+                  value:
+                    status: "error"
+                    code: 404
+                    message: "Not Found"
+                    data: null
+                    errors:
+                      - field: "jira_project_key"
+                        code: "PROJECT_NOT_FOUND"
+                        message: "No active project found with this jira_project_key"
+                    timestamp: "2024-02-26T10:30:45.123Z"
+                    request_id: "req-7f3a9b2c-4d1e-4a8f-9c5b-6e2d8f1a3b4c"
+        '422':
+          description: Unprocessable Entity - request body validation failed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "error"
+                  code:
+                    type: integer
+                    example: 422
+                  message:
+                    type: string
+                    example: "Validation Error"
+                  data:
+                    type: object
+                    nullable: true
+                  errors:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        field:
+                          type: string
+                        code:
+                          type: string
+                        message:
+                          type: string
+                  timestamp:
+                    type: string
+                    format: date-time
+                  request_id:
+                    type: string
+                    format: uuid
+              examples:
+                invalid_url:
+                  summary: Teams link URL cannot be parsed
+                  value:
+                    status: "error"
+                    code: 422
+                    message: "Validation Error"
+                    data: null
+                    errors:
+                      - field: "teams_chat_link"
+                        code: "VALIDATION_ERROR"
+                        message: "Unable to extract chat ID from the provided Teams chat link"
+                    timestamp: "2024-02-26T10:30:45.123Z"
+                    request_id: "req-7f3a9b2c-4d1e-4a8f-9c5b-6e2d8f1a3b4c"
+                invalid_type:
+                  summary: Invalid field type
+                  value:
+                    status: "error"
+                    code: 422
+                    message: "Validation Error"
+                    data: null
+                    errors:
+                      - field: "jira_project_key"
+                        code: "VALIDATION_ERROR"
+                        message: "jira_project_key must be a non-empty string"
+                    timestamp: "2024-02-26T10:30:45.123Z"
+                    request_id: "req-7f3a9b2c-4d1e-4a8f-9c5b-6e2d8f1a3b4c"
+        '500':
+          description: Internal error
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "error"
+                  code:
+                    type: integer
+                    example: 500
+                  message:
+                    type: string
+                  data:
+                    type: object
+                    nullable: true
+                  errors:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        field:
+                          type: string
+                        code:
+                          type: string
+                        message:
+                          type: string
+                  timestamp:
+                    type: string
+                    format: date-time
+                  request_id:
+                    type: string
+                    format: uuid
+
+  /automated-notification-service/api/v1/mappings/project/notifications:
+    post:
+      summary: Upsert project notification toggles
+      description: |
+        Webhook-triggered endpoint that syncs notification enable/disable
+        toggles for a given project in the project_teams_mappings table.
+
+        Identifies the project by jira_project_key in the request body.
+        Toggle values are fetched from Jira Project Hub custom fields
+        (not passed by the client) — this ensures a single source of truth.
+
+        Behavior:
+        - Looks up the project by jira_project_key in the projects table
+        - Fetches toggle values from Jira Project Hub API custom fields:
+          - customfield_11206 → daily_notification_enabled
+          - customfield_11208 → delivery_escalation_enabled
+          - customfield_11207 → sprint_progress_enabled
+          - customfield_11209 → sprint_readiness_enabled
+        - If an active mapping exists for the project → updates the toggle flags
+        - If no mapping exists → returns 404 (use the teams mapping endpoint first)
+      operation_id: upsertProjectNotificationToggles
+      tags:
+        - Mappings
+      security:
+        - bearer_auth: []
+        - jira_account_id: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - jira_project_key
+              properties:
+                jira_project_key:
+                  type: string
+                  description: Jira project key used to identify the project and fetch toggles from Project Hub.
+                  example: "PROJ"
+            examples:
+              sync_toggles:
+                summary: Sync notification toggles from Jira Project Hub
+                value:
+                  jira_project_key: "PROJ"
+      responses:
+        '200':
+          description: Notification toggles updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "success"
+                  code:
+                    type: integer
+                    example: 200
+                  message:
+                    type: string
+                    example: "Project notification toggles updated successfully"
+                  data:
+                    type: object
+                    properties:
+                      project_id:
+                        type: string
+                        format: uuid
+                        example: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                      jira_project_key:
+                        type: string
+                        example: "PROJ"
+                      daily_notification_enabled:
+                        type: boolean
+                        example: true
+                      delivery_escalation_enabled:
+                        type: boolean
+                        example: false
+                      sprint_progress_enabled:
+                        type: boolean
+                        example: true
+                      sprint_readiness_enabled:
+                        type: boolean
+                        example: false
+                      is_active:
+                        type: boolean
+                        example: true
+                  errors:
+                    type: array
+                    items:
+                      type: object
+                    example: []
+                  timestamp:
+                    type: string
+                    format: date-time
+                    example: "2024-02-26T10:30:45.123Z"
+                  request_id:
+                    type: string
+                    format: uuid
+                    example: "req-7f3a9b2c-4d1e-4a8f-9c5b-6e2d8f1a3b4c"
+              examples:
+                success:
+                  summary: Toggles updated
+                  value:
+                    status: "success"
+                    code: 200
+                    message: "Project notification toggles updated successfully"
+                    data:
+                      project_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                      jira_project_key: "PROJ"
+                      daily_notification_enabled: true
+                      delivery_escalation_enabled: false
+                      sprint_progress_enabled: true
+                      sprint_readiness_enabled: false
+                      is_active: true
+                    errors: []
+                    timestamp: "2024-02-26T10:30:45.123Z"
+                    request_id: "req-7f3a9b2c-4d1e-4a8f-9c5b-6e2d8f1a3b4c"
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "error"
+                  code:
+                    type: integer
+                    example: 401
+                  message:
+                    type: string
+                    example: "Unauthorized"
+                  data:
+                    type: object
+                    nullable: true
+                  errors:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        field:
+                          type: string
+                        code:
+                          type: string
+                        message:
+                          type: string
+                  timestamp:
+                    type: string
+                    format: date-time
+                  request_id:
+                    type: string
+                    format: uuid
+              examples:
+                unauthorized:
+                  value:
+                    status: "error"
+                    code: 401
+                    message: "Unauthorized"
+                    data: null
+                    errors:
+                      - field: "Authorization"
+                        code: "UNAUTHORIZED"
+                        message: "Invalid or expired authentication token"
+                    timestamp: "2024-02-26T10:30:45.123Z"
+                    request_id: "req-7f3a9b2c-4d1e-4a8f-9c5b-6e2d8f1a3b4c"
+        '404':
+          description: No active Teams mapping found — create base mapping first
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "error"
+                  code:
+                    type: integer
+                    example: 404
+                  message:
+                    type: string
+                    example: "Not Found"
+                  data:
+                    type: object
+                    nullable: true
+                  errors:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        field:
+                          type: string
+                        code:
+                          type: string
+                        message:
+                          type: string
+                  timestamp:
+                    type: string
+                    format: date-time
+                  request_id:
+                    type: string
+                    format: uuid
+              examples:
+                not_found:
+                  value:
+                    status: "error"
+                    code: 404
+                    message: "Not Found"
+                    data: null
+                    errors:
+                      - field: "project_id"
+                        code: "MAPPING_NOT_FOUND"
+                        message: "No active Teams mapping found for this project. Create a base mapping via /mappings/project/teams first."
+                    timestamp: "2024-02-26T10:30:45.123Z"
+                    request_id: "req-7f3a9b2c-4d1e-4a8f-9c5b-6e2d8f1a3b4c"
+        '422':
+          description: Unprocessable Entity - request body validation failed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "error"
+                  code:
+                    type: integer
+                    example: 422
+                  message:
+                    type: string
+                    example: "Validation Error"
+                  data:
+                    type: object
+                    nullable: true
+                  errors:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        field:
+                          type: string
+                        code:
+                          type: string
+                        message:
+                          type: string
+                  timestamp:
+                    type: string
+                    format: date-time
+                  request_id:
+                    type: string
+                    format: uuid
+              examples:
+                invalid_toggle_type:
+                  summary: Toggle field is not a boolean
+                  value:
+                    status: "error"
+                    code: 422
+                    message: "Validation Error"
+                    data: null
+                    errors:
+                      - field: "daily_notification_enabled"
+                        code: "VALIDATION_ERROR"
+                        message: "daily_notification_enabled must be a boolean"
+                    timestamp: "2024-02-26T10:30:45.123Z"
+                    request_id: "req-7f3a9b2c-4d1e-4a8f-9c5b-6e2d8f1a3b4c"
+        '500':
+          description: Internal error
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "error"
+                  code:
+                    type: integer
+                    example: 500
+                  message:
+                    type: string
+                  data:
+                    type: object
+                    nullable: true
+                  errors:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        field:
+                          type: string
+                        code:
+                          type: string
+                        message:
+                          type: string
+                  timestamp:
+                    type: string
+                    format: date-time
+                  request_id:
+                    type: string
+                    format: uuid
+              examples:
+                server_error:
+                  value:
+                    status: "error"
+                    code: 500
+                    message: "Internal Error"
+                    data: null
+                    errors:
+                      - field: "mapping"
+                        code: "INTERNAL_ERROR"
+                        message: "An unexpected error occurred while updating notification toggles"
+                    timestamp: "2024-02-26T10:30:45.123Z"
+                    request_id: "req-7f3a9b2c-4d1e-4a8f-9c5b-6e2d8f1a3b4c"
+
+components:
+  securitySchemes:
+    bearer_auth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT token for authentication
+    jira_account_id:
+      type: apiKey
+      in: header
+      name: X-Jira-Account-Id
+      description: Jira account ID for user identification

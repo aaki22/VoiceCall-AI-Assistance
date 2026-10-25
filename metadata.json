@@ -1,0 +1,6 @@
+{
+  "name": "Theodore - Grounded Multilingual Telephony AI Assistant",
+  "description": "Production Python FastAPI modular monolith & conversational voice telephony core providing bilingual Tamil and English voice assistance, live Gemini Search/Maps grounding, Vobiz 8kHz PCM WebSockets, and sub-300ms barge-in interruption.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

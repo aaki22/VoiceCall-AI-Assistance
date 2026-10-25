@@ -1,0 +1,45 @@
+graph TD
+    subgraph TelecomCarrier[Telephony Carrier Network]
+        MobileUser[Caller Mobile Phone] -->|PSTN / SIP| VobizCloud[Vobiz.ai Carrier Gateway]
+    end
+
+    subgraph AWSCloud[AWS Cloud Infrastructure (us-east-1)]
+        VobizCloud -->|Bi-directional WSS / HTTPS| ALB[AWS Application Load Balancer]
+
+        subgraph VPC[Virtual Private Cloud]
+            subgraph PublicSubnets[Public Subnets]
+                ALB
+                NAT[NAT Gateway]
+            end
+
+            subgraph PrivateAppSubnets[Private ECS Application Subnets]
+                ALB -->|WSS / Port 8000| ECSFargate[AWS ECS Fargate Cluster]
+
+                subgraph Container[Theodore FastAPI Container]
+                    StreamRoute[call_stream_routes.py - WebSocket Manager]
+                    VADEngine[VAD Audio Pipeline - 600ms boundary & 200ms barge-in]
+                    SessionService[call_session_service.py - Session State Machine]
+                    LangGraphCore[LangGraph StateGraph Engine]
+                    SubprocessManager[ffmpeg & yt-dlp Process Group Supervisor]
+                end
+
+                ECSFargate --- Container
+                StreamRoute --> VADEngine
+                VADEngine --> SessionService
+                SessionService --> LangGraphCore
+                SessionService --> SubprocessManager
+            end
+
+            subgraph PrivateDBSubnets[Private Database Subnets]
+                SessionService -->|Async SQLAlchemy / Port 5432| RDS[(Amazon RDS PostgreSQL Multi-AZ)]
+            end
+        end
+
+        SecretsManager[AWS Secrets Manager] -.->|Inject Credentials| Container
+    end
+
+    subgraph ExternalSaaS[External AI & Telephony Gateways]
+        LangGraphCore -->|REST / Google GenAI SDK| GeminiAPI[Google Gemini 3.8 Flash]
+        SessionService -->|WSS Streaming| InworldTTS[Inworld AI TTS-2 Flash]
+        LangGraphCore -->|Tracing Telemetry| LangSmith[LangSmith Observability Platform]
+    end

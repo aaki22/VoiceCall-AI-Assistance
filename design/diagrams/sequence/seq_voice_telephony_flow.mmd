@@ -1,0 +1,63 @@
+sequenceDiagram
+    autonumber
+    actor Caller as Caller Phone (+91...)
+    participant Carrier as Vobiz.ai Carrier Gateway
+    participant Route as FastAPI WebSocket Route (/stream/{session_id})
+    participant VAD as Silero / Energy VAD Engine
+    participant Session as CallSessionService
+    participant LangGraph as Theodore LangGraph Engine
+    participant Tools as Tool Invoker (Search/Maps/Transit/YT)
+    participant Gemini as Gemini 3.8 Flash (Grounding)
+    participant Subprocess as ffmpeg & yt-dlp Process Group
+    participant DB as Amazon RDS PostgreSQL
+
+    Note over Caller,Carrier: Inbound Call initiated
+    Carrier->>Route: HTTP POST /api/v1/telephony/webhook
+    Route->>DB: INSERT call_session (status='ringing')
+    Route-->>Carrier: VobizXML <Response><Stream url='wss://...'/></Response>
+    
+    Carrier->>Route: WebSocket Connect + 'start' Event (callId, streamId, 8kHz PCM)
+    Route->>Session: Register Stream Context (streamId, callId)
+    Session->>DB: UPDATE call_session (status='active')
+
+    loop Conversational Turn
+        Carrier->>Route: 'media' Event (20ms 8kHz PCM chunks)
+        Route->>VAD: Push PCM Frame
+        VAD->>VAD: Detect speech energy & accumulate frames
+        Note over VAD: Silence > 600ms detected -> Turn Complete
+        VAD->>Session: Emit Complete Utterance
+        Session->>LangGraph: Execute Turn (Text, Context, Language: ta/en)
+        
+        alt Query requires Real-time Grounding (E-Commerce / Train / Place)
+            LangGraph->>Tools: Route to search_tool / maps_tool / transit_tool
+            Tools->>Gemini: Model call with Grounding tool bindings
+            Gemini-->>Tools: Grounded response + URIs (Maps / Web)
+            Tools-->>LangGraph: Spoken text (Zero markdown, No URLs, Mentions 139)
+        else Media Playback Requested (YouTube Audio)
+            LangGraph->>Tools: Invoke youtube_tool
+            Tools->>Subprocess: yt-dlp piped to ffmpeg (8kHz s16le stdout)
+            Subprocess-->>Route: Continuous 8kHz PCM chunks
+            Route-->>Carrier: 'playAudio' Events (streamId, 8kHz PCM)
+            Session->>Session: Set playback_state = 'streaming'
+        end
+
+        LangGraph-->>Session: Final Assistant Utterance
+        Session->>DB: INSERT conversation_turn (telemetry, latencies)
+        Session-->>Route: Synthesized Voice Chunks
+        Route-->>Carrier: 'playAudio' Events
+        Carrier-->>Caller: Speaks to Caller
+    end
+
+    opt Caller Barge-In Interruption during Playback
+        Caller->>Carrier: Caller speaks ("Stop song, tell me weather")
+        Carrier->>Route: 'media' Events
+        Route->>VAD: Analyze incoming frames during playback
+        Note over VAD: Sustained Voice Energy > 200ms detected!
+        VAD->>Session: Trigger Barge-In Cutoff Event
+        Session->>Route: Send 'clearAudio' Event (streamId)
+        Route-->>Carrier: { "event": "clearAudio", "streamId": "..." }
+        Carrier-->>Carrier: Flushes carrier audio playback queue
+        Session->>Subprocess: os.killpg(os.getpgid(pid), signal.SIGTERM)
+        Session->>Session: Reset playback_state = 'idle', clear buffers
+        Session->>LangGraph: Dispatch fresh user turn immediately
+    end
