@@ -1,0 +1,68 @@
+@startuml voice_call_ai_sequence
+autonumber
+skinparam BoxPadding 10
+skinparam ParticipantPadding 10
+skinparam shadowing false
+
+box "External Gateway" #LightYellow
+participant "Vobiz.ai\nTelephony Gateway" as Vobiz
+end box
+
+box "FastAPI Backend (src/)" #LightCyan
+participant "CallStreamRoutes\n(routes/)" as Routes
+participant "CallSessionService\n(service/)" as SessionService
+participant "CallOrchestratorGraph\n(agents/)" as Orchestrator
+participant "Tool Layer\n(tools/)" as Tools
+participant "AudioStreamPipeline\n(service/)" as Pipe
+end box
+
+box "External APIs & DB" #LightPink
+participant "Gemini API\n(client/)" as Gemini
+participant "Inworld TTS\n(client/)" as TTS
+database "PostgreSQL\n(database/)" as DB
+end box
+
+== Phase 1: Call Initialization & WebSocket Connection ==
+Vobiz -> Routes: Establish WebSocket Stream (/api/v1/telephony/stream/{session_id})[cite: 11]
+Routes -> SessionService: handle_session_stream(session_id, caller_number, websocket)
+SessionService -> DB: Insert session state (call_sessions table)
+DB --> SessionService: Acknowledge session active
+
+== Phase 2: User Utterance & Turn Processing ==
+Vobiz -> Routes: Send 8kHz PCM audio chunk / Speech payload
+Routes -> SessionService: VAD processes audio frame (isolates speech turn > 600ms)
+SessionService -> Orchestrator: process_turn(session_state, user_utterance)
+Orchestrator -> Gemini: Evaluate intent & bind tools (Search / Maps / Transit / YouTube / Reminder)
+Gemini --> Orchestrator: Return tool call payload or direct response text
+
+alt Tool Execution (e.g., Search, Transit, or Reminder)
+    Orchestrator -> Tools: Execute selected tool (e.g., search_tool / reminder_tool)
+    Tools -> DB: Query or persist state if required
+    DB --> Tools: Success / Dataset returned
+    Tools --> Orchestrator: Tool results formatted
+    Orchestrator -> Gemini: Synthesize final conversational answer
+    Gemini --> Orchestrator: Natural text response (Tamil/English)
+end
+
+== Phase 3: Text-to-Speech & Audio Streaming ==
+Orchestrator --> SessionService: Return response_text & citations
+SessionService -> TTS: synthesize_stream(text, detected_language)
+TTS --> SessionService: AsyncIterator[bytes] (8kHz PCM chunks)
+SessionService -> Vobiz: Push audio frames over WebSocket to caller
+
+== Phase 4: User Interruption (Barge-In) Handling ==
+note over Vobiz, Pipe
+  User speaks while music/news or assistant speech is actively playing.
+end note
+Vobiz -> Routes: Inbound speech energy exceeds VAD interruption threshold (> 200ms)
+Routes -> SessionService: interrupt_active_playback(session_id)
+SessionService -> Pipe: terminate_stream() [Stops ffmpeg / yt-dlp / TTS subprocesses immediately]
+Pipe --> SessionService: Subprocesses killed (SIGTERM)
+SessionService -> Vobiz: Send buffer-clear command frame
+SessionService -> Orchestrator: Reset session state (playback_state = "idle", clear active stream)
+note over SessionService, Orchestrator
+  System captures the new user utterance as a fresh intent turn
+  without requiring a call disconnect or reconnect.
+end note
+
+@enduml

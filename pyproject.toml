@@ -1,0 +1,35 @@
+[project]
+name = "voicecall-ai-assistance"
+version = "0.1.0"
+description = "FastAPI voice-call AI assistant with LangGraph orchestration."
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "sqlalchemy",
+    "psycopg2-binary",
+    "pydantic-settings",
+    "python-multipart",
+    "requests",
+    "pydub",
+    "SpeechRecognition",
+    "google-genai",
+    "langdetect",
+    "feedparser",
+    "langchain",
+    "langchain-core",
+    "langgraph",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest",
+    "pytest-cov",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.coverage.run]
+source = ["src"]

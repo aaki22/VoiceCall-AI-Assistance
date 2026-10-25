@@ -1,0 +1,292 @@
+@startuml voice_call_ai_v1_class_diagram
+!pragma layout elk
+skinparam classAttributeIconSize 0
+skinparam classFontSize 10
+skinparam packageStyle rectangle
+skinparam shadowing false
+skinparam nodesep 30
+skinparam ranksep 45
+
+title Voice-Call AI Assistant v1 — Complete Class Diagram (FastAPI Standard Layout)
+
+package "src" {
+    package "main.py & worker.py" {
+        class "FastAPIApp" as FastAPIApp <<src/main.py>> {
+            +app: FastAPI
+            --
+            +create_app(): FastAPI
+            +configure_routes(app: FastAPI, deps: ApplicationDependencies): void
+        }
+    }
+
+    package "dependencies" {
+        class "DependencyRoot" as DependencyRoot <<src/dependencies/dependencies.py>> {
+            -settings: Settings
+            --
+            +__init__(settings: Settings)
+            +compose(): ApplicationDependencies
+        }
+
+        class "ApplicationDependencies" as ApplicationDependencies <<src/dependencies/dependencies.py / type>> {
+            +db_client: DatabaseClient
+            +auth_service: IAuthService
+            +call_session_service: ICallSessionService
+            +reminder_service: IReminderService
+        }
+    }
+
+    package "routes" {
+        class "DefaultRoutes" as DefaultRoutes <<src/routes/default.py>> {
+            -db: DatabaseClient
+            +router: APIRouter
+            --
+            +health(request: Request): Promise<APIResponse>
+        }
+
+        class "CallStreamRoutes" as CallStreamRoutes <<src/routes/call_stream_routes.py>> {
+            -service: ICallSessionService
+            +router: APIRouter
+            --
+            +handle_websocket_stream(websocket: WebSocket, session_id: UUID): Promise<void>
+        }
+
+        class "ReminderRoutes" as ReminderRoutes <<src/routes/reminder_routes.py>> {
+            -service: IReminderService
+            +router: APIRouter
+            --
+            +create_reminder(dto: ReminderInputDTO, ctx: RequestContext): Promise<APIResponse>
+        }
+    }
+
+    package "service" {
+        interface "ICallSessionService" as ICallSessionService <<src/service/call_session_service.py>> {
+            +handle_session_stream(session_id: UUID, caller_number: str, ws: WebSocket): Promise<void>
+            +interrupt_active_playback(session_id: UUID): Promise<void>
+        }
+
+        class "CallSessionService" as CallSessionService <<src/service/call_session_service.py>> {
+            -sessions: ICallSessionRepository
+            -graph_orchestrator: CallOrchestratorGraph
+            -tts_client: ITtsClient
+            -audio_pipe: AudioStreamPipeline
+            --
+            +handle_session_stream(...): Promise<void>
+            +interrupt_active_playback(session_id: UUID): Promise<void>
+        }
+
+        interface "IReminderService" as IReminderService <<src/service/reminder_service.py>> {
+            +create_reminder(dto: ReminderInputDTO, ctx: RequestContext): Promise<ReminderDTO>
+            +trigger_due_reminders(limit: int, ctx: RequestContext): Promise<int>
+        }
+
+        class "ReminderService" as ReminderService <<src/service/reminder_service.py>> {
+            -reminders: IReminderRepository
+            -vobiz_adapter: IVobizAdapter
+            --
+            +create_reminder(...): Promise<ReminderDTO>
+        }
+
+        class "AudioStreamPipeline" as AudioStreamPipeline <<src/service/audio_stream_pipeline.py>> {
+            -ffmpeg_manager: FfmpegProcessManager
+            -ytdlp_client: YtDlpClient
+            --
+            +stream_youtube_to_pcm(youtube_url: str, ws_target: WebSocket): Promise<void>
+        }
+    }
+
+    package "agents" {
+        class "CallOrchestratorGraph" as CallOrchestratorGraph <<src/agents/call_orchestrator_graph.py>> {
+            -gemini: IGeminiClient
+            -search_tool: SearchTool
+            -maps_tool: MapsTool
+            -transit_tool: TransitTool
+            -youtube_tool: YouTubeTool
+            -reminder_tool: ReminderTool
+            --
+            +compile_graph(): CompiledStateGraph
+        }
+    }
+
+    package "tools" {
+        class "SearchTool" as SearchTool <<src/tools/search_tool.py>> {
+            -gemini_client: IGeminiClient
+            +execute(query: str): Promise<str>
+        }
+
+        class "MapsTool" as MapsTool <<src/tools/maps_tool.py>> {
+            -gemini_client: IGeminiClient
+            +execute(location_query: str): Promise<str>
+        }
+
+        class "TransitTool" as TransitTool <<src/tools/transit_tool.py>> {
+            -gemini_client: IGeminiClient
+            +execute(route_query: str): Promise<str>
+        }
+
+        class "YouTubeTool" as YouTubeTool <<src/tools/youtube_tool.py>> {
+            -audio_pipeline: AudioStreamPipeline
+            +execute(query_or_url: str, ws_target: WebSocket): Promise<str>
+        }
+
+        class "ReminderTool" as ReminderTool <<src/tools/reminder_tool.py>> {
+            -reminder_service: IReminderService
+            +execute(dto: ReminderInputDTO, ctx: RequestContext): Promise<str>
+        }
+    }
+
+    package "prompts" {
+        class "TheodorePersona" as TheodorePersona <<src/prompts/system/theodore_persona.py>> {
+            +SYSTEM_PROMPT: str
+        }
+        class "TransitRules" as TransitRules <<src/prompts/tools/transit_rules.py>> {
+            +GUARDRAIL_PROMPT: str
+        }
+    }
+
+    package "repository" {
+        interface "ICallSessionRepository" as ICallSessionRepository <<src/repository/call_session_repository.py>> {
+            +find_by_id(id: UUID): Promise<call_sessions | None>
+            +insert(session: call_sessions, tx: TransactionContext): Promise<void>
+        }
+        class "CallSessionRepository" as CallSessionRepository <<src/repository/call_session_repository.py>> {
+            -db: DatabaseClient
+        }
+
+        interface "IReminderRepository" as IReminderRepository <<src/repository/reminder_repository.py>> {
+            +insert(reminder: voice_reminders, tx: TransactionContext): Promise<void>
+            +find_due(limit: int, now: datetime, tx: TransactionContext): Promise<List[voice_reminders]>
+        }
+        class "ReminderRepository" as ReminderRepository <<src/repository/reminder_repository.py>> {
+            -db: DatabaseClient
+        }
+    }
+
+    package "schema" {
+        class "call_sessions" as call_sessions_schema <<src/schema/call_session.py>> {
+            +id: UUID [PK]
+            +caller_number: str
+            +detected_language: str
+            +session_status: str
+        }
+
+        class "voice_reminders" as voice_reminders_schema <<src/schema/reminder.py>> {
+            +id: UUID [PK]
+            +caller_number: str
+            +message_text: str
+            +scheduled_for: datetime
+            +status: str
+        }
+    }
+
+    package "database" {
+        class "DatabaseClient" as DatabaseClient <<src/database/database.py>> {
+            -async_session_maker: async_sessionmaker
+            +transaction(): AsyncContextManager[AsyncSession]
+        }
+    }
+
+    package "client" {
+        interface "IGeminiClient" as IGeminiClient <<src/client/gemini_client.py>> {
+            +generate_chat_completion(prompt: str): Promise<str>
+            +bind_search_tool(): ChatGoogle
+        }
+        class "GeminiClient" as GeminiClient <<src/client/gemini_client.py>> {
+            -settings: Settings
+        }
+
+        interface "ITtsClient" as ITtsClient <<src/client/inworld_tts_client.py>> {
+            +synthesize_stream(text: str, language: str): Promise<AsyncIterator[bytes]>
+        }
+        class "InworldTtsClient" as InworldTtsClient <<src/client/inworld_tts_client.py>> {
+            -settings: Settings
+        }
+
+        class "VobizAdapter" as VobizAdapter <<src/client/vobiz_adapter.py>> {
+            +initiate_outbound_call(input: dict): Promise<dict>
+        }
+        class "YtDlpClient" as YtDlpClient <<src/client/ytdlp_client.py>> {
+            +extract_stream_url(url: str): Promise<str>
+        }
+        class "FfmpegProcessManager" as FfmpegProcessManager <<src/client/ffmpeg_manager.py>> {
+            +spawn_transcoder(stream: AsyncIterator[bytes]): Process
+        }
+    }
+
+    package "models" {
+        class "APIResponse" as APIResponse <<src/models/responses/response_models.py>> {
+            +success: bool
+            +code: int
+            +data: T
+        }
+        class "ReminderInputDTO" as ReminderInputDTO <<src/models/dtos/reminder_models.py>> {
+            +caller_number: str
+            +message_text: str
+            +scheduled_for: str
+        }
+    }
+
+    package "settings" {
+        class "Settings" as Settings <<src/settings/settings.py>> {
+            +database_url: str
+            +gemini_api_key: SecretStr
+            +inworld_api_key: SecretStr
+            +vobiz_api_key: SecretStr
+        }
+    }
+
+    package "exception" {
+        class "AppError" as AppError <<src/exception/exceptions.py>> {
+            +code: str
+            +http_status: int
+            +message: str
+        }
+    }
+}
+
+FastAPIApp --> DefaultRoutes : registers
+FastAPIApp --> CallStreamRoutes : registers
+FastAPIApp --> ReminderRoutes : registers
+
+CallStreamRoutes --> ICallSessionService : injected
+ReminderRoutes --> IReminderService : injected
+
+CallSessionService ..|> ICallSessionService : implements
+CallSessionService --> ICallSessionRepository : sessions
+CallSessionService --> CallOrchestratorGraph : graph
+CallSessionService --> ITtsClient : tts
+CallSessionService --> AudioStreamPipeline : pipe
+
+ReminderService ..|> IReminderService : implements
+ReminderService --> IReminderRepository : reminders
+ReminderService --> VobizAdapter : vobiz
+
+CallOrchestratorGraph --> IGeminiClient : gemini
+CallOrchestratorGraph --> SearchTool : uses
+CallOrchestratorGraph --> MapsTool : uses
+CallOrchestratorGraph --> TransitTool : uses
+CallOrchestratorGraph --> YouTubeTool : uses
+CallOrchestratorGraph --> ReminderTool : uses
+
+YouTubeTool --> AudioStreamPipeline : calls
+ReminderTool --> IReminderService : calls
+
+CallSessionRepository ..|> ICallSessionRepository
+CallSessionRepository --> DatabaseClient : db
+ReminderRepository ..|> IReminderRepository
+ReminderRepository --> DatabaseClient : db
+
+GeminiClient ..|> IGeminiClient
+InworldTtsClient ..|> ITtsClient
+
+DependencyRoot ..> Settings : loads config
+DependencyRoot --> DatabaseClient : initializes pool
+
+call_sessions_schema ..> CallSessionService : mapped
+voice_reminders_schema ..> ReminderService : mapped
+
+legend bottom
+  Adheres to FastAPI Agent Development Standard directory layout:
+  routes, service, agents, tools, prompts, dependencies, models, 
+  repository, schema, database, settings, utils, exception, client[cite: 11].
+endlegend
+@enduml

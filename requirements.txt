@@ -1,0 +1,17 @@
+fastapi
+uvicorn
+sqlalchemy
+psycopg2-binary
+pydantic-settings
+python-multipart
+requests
+pydub
+SpeechRecognition
+google-genai
+langdetect
+feedparser
+langchain
+langchain-core
+langgraph
+pytest
+pytest-cov
